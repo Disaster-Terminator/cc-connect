@@ -79,6 +79,41 @@ func TestExtractPostParts_NoTitle(t *testing.T) {
 	}
 }
 
+func TestExtractPostParts_AtMention(t *testing.T) {
+	p := &Platform{botOpenID: "ou_bot"}
+	post := &postLang{
+		Content: [][]postElement{
+			{
+				{Tag: "text", Text: "hi "},
+				{Tag: "at", UserId: "ou_alice", UserName: "Alice"},
+				{Tag: "text", Text: " and "},
+				{Tag: "at", UserId: "all"},
+				{Tag: "text", Text: " but not "},
+				{Tag: "at", UserId: "ou_bot", UserName: "Bot"},
+			},
+		},
+	}
+	texts, _ := p.extractPostParts("", post)
+	joined := strings.Join(texts, "")
+	want := "hi @Alice and @all but not "
+	if joined != want {
+		t.Errorf("want %q, got %q", want, joined)
+	}
+}
+
+func TestExtractPostParts_Markdown(t *testing.T) {
+	p := &Platform{}
+	post := &postLang{
+		Content: [][]postElement{
+			{{Tag: "markdown", Text: "**bold**"}},
+		},
+	}
+	texts, _ := p.extractPostParts("", post)
+	if len(texts) != 1 || texts[0] != "**bold**" {
+		t.Errorf("unexpected texts: %v", texts)
+	}
+}
+
 func TestParsePostContent_FlatFormat(t *testing.T) {
 	p := &Platform{}
 	raw := `{"title":"test","content":[[{"tag":"text","text":"hello"}]]}`
@@ -300,11 +335,38 @@ func TestExtractPostPlainText_Empty(t *testing.T) {
 	}
 }
 
-func TestExtractPostPlainText_NonTextTagsIgnored(t *testing.T) {
-	content := `{"content":[[{"tag":"text","text":"hello"},{"tag":"a","text":"link","href":"http://x.com"}]]}`
+func TestExtractPostPlainText_LinkText(t *testing.T) {
+	content := `{"content":[[{"tag":"text","text":"hello "},{"tag":"a","text":"link","href":"http://x.com"}]]}`
 	got := extractPostPlainText(content)
-	if got != "hello" {
-		t.Errorf("expected 'hello', got %q", got)
+	if got != "hello link" {
+		t.Errorf("expected 'hello link', got %q", got)
+	}
+}
+
+func TestExtractPostPlainText_AtMention(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"named", `{"content":[[{"tag":"text","text":"hi "},{"tag":"at","user_id":"ou_x","user_name":"Alice"}]]}`, "hi @Alice"},
+		{"all", `{"content":[[{"tag":"at","user_id":"all"}]]}`, "@all"},
+		{"fallback", `{"content":[[{"tag":"at","user_id":"ou_x"}]]}`, "@user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractPostPlainText(tc.content); got != tc.want {
+				t.Errorf("want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestExtractPostPlainText_Markdown(t *testing.T) {
+	content := `{"content":[[{"tag":"markdown","text":"**bold** and *italic*"}]]}`
+	got := extractPostPlainText(content)
+	if got != "**bold** and *italic*" {
+		t.Errorf("expected markdown passthrough, got %q", got)
 	}
 }
 
@@ -399,5 +461,40 @@ func TestStripMentions(t *testing.T) {
 				t.Errorf("stripMentions() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveBotSenderName(t *testing.T) {
+	p := &Platform{peerBots: map[string]string{
+		"cli_known": "Jeeves",
+		"cli_other": "Ivy",
+	}}
+	tests := []struct {
+		name  string
+		appID string
+		want  string
+	}{
+		{"empty app id falls back to Bot", "", "Bot"},
+		{"known app id resolves to alias", "cli_known", "Jeeves"},
+		{"another known app id", "cli_other", "Ivy"},
+		{"unknown app id surfaces id", "cli_unknown", "Bot[cli_unknown]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.resolveBotSenderName(tt.appID)
+			if got != tt.want {
+				t.Errorf("resolveBotSenderName(%q) = %q, want %q", tt.appID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBotSenderName_NilMap(t *testing.T) {
+	p := &Platform{}
+	if got := p.resolveBotSenderName("cli_any"); got != "Bot[cli_any]" {
+		t.Errorf("nil peerBots: got %q, want %q", got, "Bot[cli_any]")
+	}
+	if got := p.resolveBotSenderName(""); got != "Bot" {
+		t.Errorf("nil peerBots + empty id: got %q, want %q", got, "Bot")
 	}
 }
